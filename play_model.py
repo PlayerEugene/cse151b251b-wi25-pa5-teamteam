@@ -42,25 +42,23 @@ def print_board(board):
     print("+")
     print("    ------> Player 1's Side --------\n")
 
-# Function to load only Player 2's model (since Player 1 is controlled by the human)
 def load_model():
-    model_p2 = MancalaCNN()
+    model = MancalaCNN()
+    model.load_state_dict(torch.load('mancala_model.pth'))
+    model.eval()
     
-    # Load pre-trained model weights for Player 2
-    model_p2.load_state_dict(torch.load('mancala_model_p2.pth'))
-    
-    # Set model to evaluation mode (disables dropout, etc.)
-    model_p2.eval()
-    
-    return model_p2
+    return model
 
-# Function to let the model play against the user (human)
 def play_model():
-    # Load model for Player 2 (the trained model)
-    model_p2 = load_model()
-    
+    model = load_model()
+
+    user_player = input("Which player would you like to control? (1 or 2): ")
+    while user_player not in ['1', '2']:
+        user_player = input("Invalid input. Please enter 1 or 2: ")
+    user_player = int(user_player)
+
     game = MancalaGame()
-    
+
     while not game.is_game_over():
         print_board(game.get_board_state())
         current_player = game.get_current_player()
@@ -69,7 +67,7 @@ def play_model():
         print(f"Player {current_player}'s turn")
         print(f"Valid moves: {valid_moves}")
         
-        if current_player == 1:  # Human plays Player 1
+        if current_player == user_player:
             while True:
                 try:
                     move = int(input("Enter pocket number: "))
@@ -83,22 +81,23 @@ def play_model():
                 except ValueError:
                     print("Please enter a valid number")
         
-        else:  # Model plays Player 2
+        else:
             with torch.no_grad():
-                # Get board state for Player 2
                 p1_side = torch.tensor(game.board[0:6], dtype=torch.float32).unsqueeze(0)
                 p2_side = torch.tensor(game.board[7:13], dtype=torch.float32).unsqueeze(0)
                 
-                inputs = torch.stack((p1_side, p2_side), dim=0).unsqueeze(0)
+                player_turn = torch.tensor([1.0 if current_player == 1 else -1.0] * 6, dtype=torch.float32).unsqueeze(0)
+
+                inputs = torch.cat((p1_side, p2_side, player_turn), dim=1)
+                inputs = inputs.view(1, 3, 1, 6)
                 
-                move_scores = model_p2(inputs)
-                # Mask invalid moves
+                move_scores = model(inputs)
                 for move in range(move_scores.shape[-1]):
-                    if move + 7 not in valid_moves:
-                        move_scores[0, move] = float('-inf')  # Mask invalid moves
-                predicted_move = torch.argmax(move_scores).item() + 7
+                    if move not in valid_moves:
+                        move_scores[0, move] = float('-inf')
+                predicted_move = torch.argmax(move_scores).item()
                 
-                print(f"Player 2 (Model) plays: {predicted_move}")
+                print(f"Player {current_player} (Model) plays: {predicted_move}")
                 game.make_move(predicted_move)
         
     print("\nGame Over!")
