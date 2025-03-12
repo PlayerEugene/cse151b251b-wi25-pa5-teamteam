@@ -17,7 +17,7 @@ def self_play_game(model_p1, model_p2):
     game = MancalaGame()
     history = []
 
-    print("Game started!")
+    # print("Game started!")
 
     while not game.is_game_over():
         current_player = game.get_current_player()
@@ -84,26 +84,24 @@ def self_play_game(model_p1, model_p2):
     #         rewards.append(0)
     #     else:
     #         rewards.append(0)
-    reward = winner
 
-    print(reward)
-    return history, reward
+    return history, winner
 
 print("Training started")
 
-num_epochs = 100
+num_epochs = 1000
 for epoch in range(num_epochs):
     print(f"Starting epoch {epoch + 1} of {num_epochs}")
-    history, reward = self_play_game(model_p1, model_p2)
+    history, winner = self_play_game(model_p1, model_p2)
     
     for (inputs, predicted_move, current_player) in history:
         if current_player == 1:
             optimizer_p1.zero_grad()
             outputs = model_p1(inputs)
             loss = criterion(outputs, torch.tensor([predicted_move]))
-            if reward == 1:
+            if winner == 1:
                 loss = loss * 1
-            elif reward == 2:
+            elif winner == 2:
                 loss = loss * -1
             else:
                 loss = loss * 0
@@ -117,9 +115,9 @@ for epoch in range(num_epochs):
             target_move = predicted_move - 7
 
             loss = criterion(outputs, torch.tensor([target_move]))
-            if reward == 1:
+            if winner == 1:
                 loss = loss * -1
-            elif reward == 2:
+            elif winner == 2:
                 loss = loss * 1
             else:
                 loss = loss * 0
@@ -143,10 +141,10 @@ def evaluate_models(model_p1, model_p2, num_games=10):
 
     for _ in range(num_games):
         game = MancalaGame()
-        history, reward = self_play_game(model_p1, model_p2)
-        if reward == 1:
+        history, winner = self_play_game(model_p1, model_p2)
+        if winner == 1:
             wins_p1 += 1
-        elif reward == 2:
+        elif winner == 2:
             wins_p2 += 1
         else:
             draws += 1
