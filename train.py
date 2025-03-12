@@ -93,7 +93,7 @@ num_epochs = 1000
 for epoch in range(num_epochs):
     print(f"Starting epoch {epoch + 1} of {num_epochs}")
     history, winner = self_play_game(model_p1, model_p2)
-    
+
     for (inputs, predicted_move, current_player) in history:
         if current_player == 1:
             optimizer_p1.zero_grad()
