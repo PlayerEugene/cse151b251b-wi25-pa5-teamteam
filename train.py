@@ -1,13 +1,13 @@
 import random
 import torch
 import torch.optim as optim
-from MancalaCNN import MancalaCNN
+from MancalaModel import MancalaModel
 from engine import MancalaGame
 from torch.optim.lr_scheduler import StepLR
 
-model = MancalaCNN()
+model = MancalaModel()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
-scheduler = StepLR(optimizer, step_size=100, gamma=0.5)
+# scheduler = StepLR(optimizer, step_size=100, gamma=0.5)
 criterion = torch.nn.CrossEntropyLoss()
 
 def self_play_game(model):
@@ -22,13 +22,7 @@ def self_play_game(model):
 
         # print(f"Player {current_player} is making a move. Valid moves: {valid_moves}")
 
-        p1_side = torch.tensor(game.board[0:6], dtype=torch.float32).unsqueeze(0)
-        p2_side = torch.tensor(game.board[7:13], dtype=torch.float32).unsqueeze(0)
-
-        player_turn = torch.tensor([1.0 if current_player == 1 else -1.0] * 6, dtype=torch.float32).unsqueeze(0)
-
-        inputs = torch.cat((p1_side, p2_side, player_turn), dim=1)
-        inputs = inputs.view(1, 3, 1, 6)
+        inputs = torch.tensor((game.board[0:6] + game.board[7:13] + [current_player]), dtype=torch.float32)
 
         # epsilon = 0.1
         epsilon = max(0.1, 1.0 - (epoch / num_epochs))
@@ -37,27 +31,23 @@ def self_play_game(model):
             move_scores, state_value = model(inputs)
         
         # Mask invalid moves (set their scores to -inf)
-        # for move in range(move_scores.shape[-1]):
-        #     if move not in valid_moves:
-        #         move_scores[0, move] = float('-inf')
         for move in range(move_scores.shape[-1]):
             if current_player == 1:
             # if move < 6:
                 if move not in valid_moves:
-                    move_scores[0, move] = float('-inf')
+                    move_scores[move] = float(0)
             else:
                 if move + 1 not in valid_moves:
-                    move_scores[0, move] = float('-inf')
-        predicted_move = torch.argmax(move_scores).item()
-        if predicted_move >= 6:
-            predicted_move += 1
+                    move_scores[move] = float(0)
 
         if random.random() < epsilon:
             predicted_move = random.choice(valid_moves)
         else:
             predicted_move = torch.argmax(move_scores).item()
+            if predicted_move >= 6:
+                predicted_move += 1
 
-        history.append((inputs, predicted_move, current_player))
+        history.append([inputs, predicted_move, current_player])
 
         game.make_move(predicted_move)
 
@@ -72,58 +62,53 @@ def self_play_game(model):
     return history, winner
 
 # print("Training started")
-
-num_epochs = 1000
+num_epochs = 10000
 '''EXPLORE GAMMA REWARD DECAY'''
 gamma = 0.9
 for epoch in range(num_epochs):
     print(f"Starting epoch {epoch + 1} of {num_epochs}")
     history, winner = self_play_game(model)
     
-    for (inputs, predicted_move, current_player) in reversed(history):
-        optimizer.zero_grad()
-        # outputs = model(inputs)
+    # for (inputs, predicted_move, current_player) in reversed(history):
+    optimizer.zero_grad()
 
-        # if (predicted_move >= 7):
-        #     predicted_move -= 1
+    inputs, predicted_move, current_player = zip(*history)
 
-        # loss = criterion(outputs, torch.tensor([predicted_move]))
+    inputs = torch.stack(inputs)
+    predicted_move = list(predicted_move)
+    predicted_move = [move - 1 if move >= 7 else move for move in predicted_move]
+    predicted_move = torch.tensor(predicted_move, dtype=torch.long)
+    current_player = list(current_player)
 
-        # if winner == current_player:
-        #     reward = 1
-        # elif winner == 0:
-        #     reward = 0
-        # else:
-        #     reward = -1
-        # loss = loss * reward
+    move_scores, state_value = model(inputs)
+    cross_entropy = torch.nn.CrossEntropyLoss()
+    mean_squared = torch.nn.MSELoss()
 
-        move_scores, state_value = model(inputs)
+    reward = [1 if winner == player else 0 if winner == 0 else -1 for player in current_player]
 
-        if (predicted_move >= 7):
-            predicted_move -= 1
+    # Apply the reward to the model's predicted action
+    # Policy loss: Using the softmax output of the model
+    # policy_loss = torch.log(torch.softmax(move_scores, dim=-1)[predicted_move]) * reward
+    one_hot_moves = torch.nn.functional.one_hot(predicted_move, num_classes=12).float()
 
-        if winner == current_player:
-            reward = 1
-        elif winner == 0:
-            reward = 0
-        else:
-            reward = -1
+    policy_loss = cross_entropy(move_scores, one_hot_moves)
 
-        # Apply the reward to the model's predicted action
-        # Policy loss: Using the softmax output of the model
-        policy_loss = torch.log(torch.softmax(move_scores, dim=-1)[0, predicted_move]) * reward
+    # print(predicted_move)
+    # print(current_player)
 
-        # Value loss: Compare the predicted state value to the total reward
-        value_loss = (state_value - reward) ** 2
+    # Value loss: Compare the predicted state value to the total reward
+    # value_loss = (state_value - reward) ** 2
+    value_loss = mean_squared(state_value, torch.tensor(reward).unsqueeze(1).float())
 
-        loss = -policy_loss + value_loss
+    loss = policy_loss + value_loss
+    # loss = torch.cat((policy_loss.unsqueeze(0), value_loss.unsqueeze(0)), dim=-1)
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-        loss.backward()
-        optimizer.step()
+    loss.backward()
+    optimizer.step()
 
-    scheduler.step()
+    # scheduler.step()
 
     print(f"Epoch {epoch + 1}/{num_epochs} completed")
 
@@ -131,7 +116,7 @@ for epoch in range(num_epochs):
 
 torch.save(model.state_dict(), 'mancala_model.pth')
 
-def evaluate_models(model, num_games=10):
+def evaluate_models(model, num_games=100):
     model.eval()
 
     wins_p1 = 0

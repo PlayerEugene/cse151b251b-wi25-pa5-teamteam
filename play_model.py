@@ -1,6 +1,6 @@
 import random
 import torch
-from MancalaCNN import MancalaCNN
+from MancalaModel import MancalaModel
 from engine import MancalaGame
 
 # Function to print the board in an intuitive ASCII art format
@@ -43,7 +43,7 @@ def print_board(board):
     print("    ------> Player 1's Side --------\n")
 
 def load_model():
-    model = MancalaCNN()
+    model = MancalaModel()
     model.load_state_dict(torch.load('mancala_model.pth'))
     model.eval()
     
@@ -83,19 +83,21 @@ def play_model():
         
         else:
             with torch.no_grad():
-                p1_side = torch.tensor(game.board[0:6], dtype=torch.float32).unsqueeze(0)
-                p2_side = torch.tensor(game.board[7:13], dtype=torch.float32).unsqueeze(0)
+                inputs = torch.tensor((game.board[0:6] + game.board[7:13] + [current_player]), dtype=torch.float32)
+                move_scores, state_value = model(inputs)
                 
-                player_turn = torch.tensor([1.0 if current_player == 1 else -1.0] * 6, dtype=torch.float32).unsqueeze(0)
-
-                inputs = torch.cat((p1_side, p2_side, player_turn), dim=1)
-                inputs = inputs.view(1, 3, 1, 6)
-                
-                move_scores = model(inputs)
+                # Mask invalid moves (set their scores to -inf)
                 for move in range(move_scores.shape[-1]):
-                    if move not in valid_moves:
-                        move_scores[0, move] = float('-inf')
+                    if current_player == 1:
+                    # if move < 6:
+                        if move not in valid_moves:
+                            move_scores[move] = float(0)
+                    else:
+                        if move + 1 not in valid_moves:
+                            move_scores[move] = float(0)
                 predicted_move = torch.argmax(move_scores).item()
+                if predicted_move >= 6:
+                    predicted_move += 1
                 
                 print(f"Player {current_player} (Model) plays: {predicted_move}")
                 game.make_move(predicted_move)

@@ -1,6 +1,6 @@
 import random
 import torch
-from MancalaCNN import MancalaCNN
+from MancalaModel import MancalaModel
 from engine import MancalaGame
 
 def print_board(board):
@@ -42,7 +42,7 @@ def print_board(board):
     print("    ------> Player 1's Side --------\n")
 
 def load_model():
-    model = MancalaCNN()
+    model = MancalaModel()
     model.load_state_dict(torch.load('mancala_model.pth'))
     model.eval()
     
@@ -65,23 +65,18 @@ def play_random():
         
         else:
             with torch.no_grad():
-                p1_side = torch.tensor(game.board[0:6], dtype=torch.float32).unsqueeze(0)
-                p2_side = torch.tensor(game.board[7:13], dtype=torch.float32).unsqueeze(0)
-                
-                player_turn = torch.tensor([1.0 if current_player == 1 else -1.0] * 6, dtype=torch.float32).unsqueeze(0)
+                inputs = torch.tensor((game.board[0:6] + game.board[7:13] + [current_player]), dtype=torch.float32)
 
-                inputs = torch.cat((p1_side, p2_side, player_turn), dim=1)
-                inputs = inputs.view(1, 3, 1, 6)
-                
                 move_scores, state_value = model(inputs)
 
                 for move in range(move_scores.shape[-1]):
                     if current_player == 1:
+                    # if move < 6:
                         if move not in valid_moves:
-                            move_scores[0, move] = float('-inf')
+                            move_scores[move] = float('-inf')
                     else:
                         if move + 1 not in valid_moves:
-                            move_scores[0, move] = float('-inf')
+                            move_scores[move] = float('-inf')
                 predicted_move = torch.argmax(move_scores).item()
                 if predicted_move >= 6:
                     predicted_move += 1
