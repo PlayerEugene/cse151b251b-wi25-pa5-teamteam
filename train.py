@@ -10,7 +10,7 @@ optimizer = optim.Adam(model.parameters(), lr=0.001)
 # scheduler = StepLR(optimizer, step_size=100, gamma=0.5)
 criterion = torch.nn.CrossEntropyLoss()
 
-def self_play_game(model):
+def self_play_game(model, epoch, num_epochs):
     game = MancalaGame()
     history = []
 
@@ -67,7 +67,7 @@ num_epochs = 10000
 gamma = 0.9
 for epoch in range(num_epochs):
     print(f"Starting epoch {epoch + 1} of {num_epochs}")
-    history, winner = self_play_game(model)
+    history, winner = self_play_game(model, epoch, num_epochs)
     
     # for (inputs, predicted_move, current_player) in reversed(history):
     optimizer.zero_grad()

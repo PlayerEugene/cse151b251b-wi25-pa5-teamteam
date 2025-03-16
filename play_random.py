@@ -1,4 +1,5 @@
 import random
+from matplotlib import pyplot as plt
 import torch
 from MancalaModel import MancalaModel
 from engine import MancalaGame
@@ -106,12 +107,49 @@ def simulate_games(num_games=100):
             draws += 1
         else:
             model_wins += 1
-        print(f"Game {_} done")
+        # print(f"Game {_} done")
     
     print(f"After {num_games} games:")
     print(f"Random wins: {random_wins}")
     print(f"Model wins: {model_wins}")
     print(f"Draws: {draws}")
 
+    return random_wins, model_wins, draws
+
+def evaluate_multiple_runs(num_runs=10, num_games=100):
+    results_p1 = []
+    results_p2 = []
+    results_draws = []
+
+    for _ in range(num_runs):
+        wins_p1, wins_p2, draws = simulate_games(num_games)
+        results_p1.append(wins_p1)
+        results_p2.append(wins_p2)
+        results_draws.append(draws)
+
+    return results_p1, results_p2, results_draws
+
+def plot_results(num_runs, results_p1, results_p2, results_draws):
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(range(1, num_runs + 1), results_p1, label="Random Wins", marker='o', linestyle='-', color='b')
+    plt.plot(range(1, num_runs + 1), results_p2, label="Model Wins", marker='o', linestyle='-', color='r')
+    plt.plot(range(1, num_runs + 1), results_draws, label="Draws", marker='o', linestyle='-', color='g')
+
+    plt.title(f"Model Performance Over {num_runs} Runs")
+    plt.xlabel('Run Number')
+    plt.ylabel('Number of Games')
+    plt.legend()
+
+    plt.show()
+
+def play():
+    num_runs = 10
+    num_games = 1000
+    results_p1, results_p2, results_draws = evaluate_multiple_runs(num_runs=num_runs, num_games=num_games)
+    
+    # Plot the results
+    plot_results(num_runs, results_p1, results_p2, results_draws)
+
 if __name__ == "__main__":
-    simulate_games(num_games=1000)
+    play()
