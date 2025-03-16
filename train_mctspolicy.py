@@ -186,11 +186,9 @@ def main():
         lr=1e-3
     )
 
-    mcts_policy.save_policy_weights(mcts_policy, 'mcts_policy.pth')
-
     evaluate_mctspolicy_vs_mcts(mcts_policy, num_games=100, mcts_simulations=50)
 
-
+    MancalaModelMCTSPolicy.save_policy_weights(mcts_policy, "policy_model.pth")
 
 if __name__ == "__main__":
     main()
