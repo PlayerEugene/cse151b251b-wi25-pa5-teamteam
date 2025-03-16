@@ -5,6 +5,9 @@ import random
 import math
 import torch
 import torch.optim as optim
+import numpy as np
+from torch.utils.data import DataLoader, TensorDataset
+import copy
 
 def copy_game_state(game: MancalaGame) -> MancalaGame:
     new_game = MancalaGame()
@@ -165,67 +168,408 @@ class MancalaModelMCTS:
                 best_nodes.append(child)
         return random.choice(best_nodes)
 
-class SimpleMCTSPolicy:
-    def __init__(self, model, c_puct=1.4, n_simulations=50):
+class MancalaModelMCTSPolicy:
+    def __init__(self, 
+                 model: MancalaModel,
+                 c_puct=1.4,
+                 n_simulations=50,
+                 dirichlet_alpha=0.03,
+                 epsilon=0.25):
+
         self.model = model
-        self.mcts_agent = MancalaModelMCTS(num_simulations=n_simulations, ucb_c=c_puct)
+        self.c_puct = c_puct
+        self.n_simulations = n_simulations
+        self.dirichlet_alpha = dirichlet_alpha
+        self.epsilon = epsilon
 
-    def _run_mcts(self, game):
-        root = self.mcts_agent.Node(game_state=copy_game_state(game))
-        for _ in range(self.mcts_agent.num_simulations):
-            sel = self.mcts_agent._selection(root)
-            exp = self.mcts_agent._expansion(sel)
-            res = self.mcts_agent._simulation(exp.game_state)
-            self.mcts_agent._backpropagation(exp, res)
-        return root
+        # MCTS statistics:
+        self.N = {}
+        self.W = {}
+        self.Q = {}
+        self.P = {}
 
-    def get_action_prob(self, game):
-        r = self._run_mcts(game)
-        d = [0]*12
-        s = 0
-        for c in r.children:
-            idx = c.move if c.move < 6 else c.move - 1
-            d[idx] = c.visit_count
-            s += c.visit_count
-        if s < 1e-8: s = 1
-        return [x/s for x in d]
+        # Flag for whether to add noise to the root node (self-play).
+        self.add_dirichlet_noise = False
 
-    def inference_move(self, game):
-        p = self.get_action_prob(game)
-        i = max(range(len(p)), key=lambda k: p[k])
-        return i if i < 6 else i + 1
+    def _reset_mcts(self):
+        """
+        Clear MCTS data so each new game has its own fresh search tree.
+        """
+        self.N.clear()
+        self.W.clear()
+        self.Q.clear()
+        self.P.clear()
 
-    def train_self_play(self, n_games=10, batch_size=64, epochs=1, lr=1e-3):
-        data = []
-        for _ in range(n_games):
-            g = MancalaGame()
-            hist = []
-            while not g.is_game_over():
-                ap = self.get_action_prob(g)
-                st = g.board[0:6] + g.board[7:13] + [g.current_player]
-                mv = random.choices(range(12), weights=ap, k=1)[0]
-                hist.append((st, ap, g.get_current_player()))
-                g.make_move(mv if mv < 6 else mv + 1)
-            p1, p2 = g.get_score()
-            w = 1 if p1 > p2 else (2 if p2 > p1 else 0)
-            for s, p, cp in hist:
-                z = 0 if w == 0 else (1 if w == cp else -1)
-                data.append((s, p, z))
-        X = torch.tensor([d[0] for d in data], dtype=torch.float32)
-        Py = torch.tensor([d[1] for d in data], dtype=torch.float32)
-        Zy = torch.tensor([d[2] for d in data], dtype=torch.float32).unsqueeze(-1)
-        ds = torch.utils.data.TensorDataset(X, Py, Zy)
-        dl = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=True)
-        opt = optim.Adam(self.model.parameters(), lr=lr)
-        ce = nn.CrossEntropyLoss()
+    def _get_state_key(self, game: MancalaGame) -> str:
+        board_str = ",".join(map(str, game.board))
+        return f"{board_str}-{game.current_player}"
+
+    def _predict(self, game: MancalaGame):
+        """
+        Forward pass through the neural network to get policy (move_probs) and value.
+        """
+        in_tensor = torch.tensor(
+            game.board[0:6] + game.board[7:13] + [game.current_player],
+            dtype=torch.float32
+        ).unsqueeze(0)
+        with torch.no_grad():
+            move_probs, value = self.model(in_tensor)
+        move_probs = move_probs[0].cpu().numpy()
+        value = value[0].item()
+        return move_probs, value
+
+    def _expand_node(self, game: MancalaGame, state_key: str):
+        policy, value = self._predict(game)
+        valid_moves = game.get_valid_moves()
+
+        # Adjust probabilities for valid moves only:
+        for idx in range(len(policy)):
+            pocket = idx if idx < 6 else idx + 1
+            if pocket not in valid_moves:
+                policy[idx] = 0.0
+
+        sum_p = sum(policy)
+        if sum_p > 1e-8:
+            policy = policy / sum_p
+        else:
+            # If all probabilities are zero, distribute uniformly among valid moves.
+            for idx in range(len(policy)):
+                pocket = idx if idx < 6 else idx + 1
+                if pocket in valid_moves:
+                    policy[idx] = 1.0
+            policy /= sum(policy)
+
+        # Add Dirichlet noise if we are at the root node (self-play training).
+        if self.add_dirichlet_noise:
+            dirichlet_input = [
+                self.dirichlet_alpha if (idx if idx < 6 else idx + 1) in valid_moves else 0.0001 
+                for idx in range(len(policy))
+            ]
+            noise = np.random.dirichlet(dirichlet_input)
+            for i in range(len(policy)):
+                policy[i] = (1 - self.epsilon) * policy[i] + self.epsilon * noise[i]
+            policy_sum = sum(policy)
+            if policy_sum > 1e-8:
+                policy /= policy_sum
+
+        # Store MCTS policy, initialize stats
+        self.P[state_key] = policy
+        self.N[state_key] = {}
+        self.W[state_key] = {}
+        self.Q[state_key] = {}
+        for mv in valid_moves:
+            self.N[state_key][mv] = 0
+            self.W[state_key][mv] = 0
+            self.Q[state_key][mv] = 0
+
+        return value
+
+    def _ucb_score(self, s_key: str, a: int, parent_sum_visits: int):
+        a_idx = a if a < 6 else a - 1
+        q_val = self.Q[s_key][a]
+        p_val = self.P[s_key][a_idx]
+        n_val = self.N[s_key][a]
+        return q_val + self.c_puct * p_val * math.sqrt(parent_sum_visits) / (1 + n_val)
+
+    def _simulate(self, game: MancalaGame):
+        """
+        One MCTS simulation from the current state to expand or reach terminal.
+        """
+        from copy import deepcopy
+        state_history = []
+        current_game = deepcopy(game)
+        state_key = self._get_state_key(current_game)
+
+        while True:
+            valid_moves = current_game.get_valid_moves()
+            if current_game.is_game_over() or state_key not in self.P:
+                break
+            parent_visits = sum(self.N[state_key].values())
+            best_action = None
+            best_ucb = -float('inf')
+            for a in valid_moves:
+                ucb = self._ucb_score(state_key, a, parent_visits)
+                if ucb > best_ucb:
+                    best_ucb = ucb
+                    best_action = a
+            state_history.append((state_key, best_action))
+            current_game.make_move(best_action)
+            state_key = self._get_state_key(current_game)
+            if current_game.is_game_over():
+                break
+
+        # Leaf node:
+        if not current_game.is_game_over():
+            leaf_value = self._expand_node(current_game, state_key)
+        else:
+            # Terminal node, compute value from winner:
+            p1_score, p2_score = current_game.get_score()
+            if p1_score == p2_score:
+                leaf_value = 0.0
+            else:
+                root_player = game.current_player
+                winner = 1 if p1_score > p2_score else 2
+                leaf_value = 1.0 if winner == root_player else -1.0
+
+        # Backpropagate:
+        cur_value = leaf_value
+        for (prev_key, action_taken) in reversed(state_history):
+            self.N[prev_key][action_taken] += 1
+            self.W[prev_key][action_taken] += cur_value
+            self.Q[prev_key][action_taken] = self.W[prev_key][action_taken] / self.N[prev_key][action_taken]
+            cur_value = -cur_value
+
+    def get_action_prob(self, game: MancalaGame, temp=1.0, add_dirichlet_noise=False):
+        """
+        Return the MCTS-based policy (a probability distribution over all 12 pockets).
+        """
+        self.add_dirichlet_noise = add_dirichlet_noise
+        # Run MCTS simulations from the current game state
+        for _ in range(self.n_simulations):
+            self._simulate(game)
+        state_key = self._get_state_key(game)
+        valid_moves = game.get_valid_moves()
+
+        counts = [0] * 12
+        if state_key not in self.N:
+            # If we somehow never expanded, fallback to uniform among valid moves
+            for idx in range(12):
+                pocket = idx if idx < 6 else idx + 1
+                if pocket in valid_moves:
+                    counts[idx] = 1
+        else:
+            # Use visit counts
+            for mv in valid_moves:
+                idx = mv if mv < 6 else mv - 1
+                counts[idx] = self.N[state_key][mv]
+
+        # Softmax or argmax over counts, based on temp
+        if temp < 1e-8:
+            # Argmax
+            best_idx = max(range(12), key=lambda i: counts[i])
+            policy = [0] * 12
+            policy[best_idx] = 1.0
+            return policy
+        else:
+            counts_exp = [c**(1.0 / temp) for c in counts]
+            total = sum(counts_exp)
+            if total < 1e-8:
+                # If all counts are 0, distribute uniformly among valid moves.
+                policy = [0] * 12
+                for idx in range(12):
+                    pocket = idx if idx < 6 else idx + 1
+                    if pocket in valid_moves:
+                        policy[idx] = 1
+                sm = sum(policy)
+                policy = [p / sm for p in policy]
+            else:
+                policy = [x / total for x in counts_exp]
+            return policy
+
+    def play_self_game(self, temp=1.0):
+        """
+        Plays one full game in self-play mode. 
+        Returns a list of (state, π, z) for training.
+        """
+        train_examples = []
+        from copy import deepcopy
+
+        game = MancalaGame()
+        self._reset_mcts()  # Start a fresh search tree for this game.
+        history = []
+        
+        while not game.is_game_over():
+            policy = self.get_action_prob(game, temp=temp, add_dirichlet_noise=True)
+            state_vec = game.board[0:6] + game.board[7:13] + [game.current_player]
+            history.append((state_vec, policy, game.current_player))
+
+            action_idx = random.choices(range(12), weights=policy, k=1)[0]
+            pocket = action_idx if action_idx < 6 else action_idx + 1
+            game.make_move(pocket)
+
+        p1_score, p2_score = game.get_score()
+        if p1_score > p2_score:
+            winner = 1
+        elif p2_score > p1_score:
+            winner = 2
+        else:
+            winner = 0
+
+        # Convert all steps to final training data:
+        for (state_vec, pi, cur_player) in history:
+            if winner == 0:
+                z = 0
+            else:
+                z = 1 if (winner == cur_player) else -1
+            train_examples.append((state_vec, pi, z))
+
+        return train_examples
+
+    def _train_on_examples(self, examples, batch_size=64, epochs=1, lr=1e-3):
+        """
+        Train the network on the provided examples (state, pi, z).
+        This is extracted from your `train_self_play(...)` code but modularized.
+        """
+        states = []
+        pis = []
+        zs = []
+        for (state_vec, pi, z) in examples:
+            states.append(state_vec)
+            pis.append(pi)
+            zs.append(z)
+
+        states_t = torch.tensor(states, dtype=torch.float32)
+        pis_t = torch.tensor(pis, dtype=torch.float32)
+        zs_t = torch.tensor(zs, dtype=torch.float32).unsqueeze(-1)
+
+        dataset = TensorDataset(states_t, pis_t, zs_t)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        optimizer = optim.Adam(self.model.parameters(), lr=lr)
+        xent = nn.CrossEntropyLoss()
         mse = nn.MSELoss()
+
         self.model.train()
         for _ in range(epochs):
-            for xb, pb, zb in dl:
-                opt.zero_grad()
-                op, ov = self.model(xb)
-                l1 = -(pb * torch.log(op+1e-8)).sum(dim=1).mean()
-                l2 = mse(ov, zb)
-                (l1+l2).backward()
-                opt.step()
+            for batch_s, batch_pi, batch_z in dataloader:
+                optimizer.zero_grad()
+                out_pi, out_v = self.model(batch_s)
+                
+                # Policy loss (cross-entropy but with softmax input directly)
+                log_probs = torch.log(out_pi + 1e-7)
+                policy_loss = -(batch_pi * log_probs).sum(dim=1).mean()
+                
+                # Value loss (MSE)
+                value_loss = mse(out_v, batch_z)
+                
+                loss = policy_loss + value_loss
+                loss.backward()
+                optimizer.step()
+
         self.model.eval()
+
+    def pit(self, opponent_policy, n_games=10):
+        """
+        Pit this policy (self) against 'opponent_policy' for n_games.
+        Return fraction of games that 'self' wins.
+        Each side can go first half the time (optional).
+        """
+        self_wins = 0
+        for game_idx in range(n_games):
+            # Alternate who goes first, for fairness
+            # (Assuming MancalaGame can set current_player manually, or
+            #  just rely on the default. You might vary who starts if desired.)
+            
+            game = MancalaGame()
+            self._reset_mcts()
+            opponent_policy._reset_mcts()
+            
+            # If you want to alternate who goes first:
+            # if game_idx % 2 == 1:
+            #     game.current_player = 2
+
+            while not game.is_game_over():
+                if game.current_player == 1:
+                    # use 'self' to pick a move
+                    policy = self.get_action_prob(game, temp=0.0, add_dirichlet_noise=False)
+                    action_idx = np.argmax(policy)
+                else:
+                    # use the opponent policy
+                    policy = opponent_policy.get_action_prob(game, temp=0.0, add_dirichlet_noise=False)
+                    action_idx = np.argmax(policy)
+
+                pocket = action_idx if action_idx < 6 else action_idx + 1
+                game.make_move(pocket)
+
+            p1_score, p2_score = game.get_score()
+            winner = 1 if (p1_score > p2_score) else (2 if p2_score > p1_score else 0)
+            if winner == 1:
+                self_wins += 1
+        return self_wins / n_games
+
+    def train_policy_iteration(self, 
+                               num_iters=10, 
+                               n_games_per_iter=10, 
+                               pit_games=10, 
+                               threshold=0.55,
+                               batch_size=64, 
+                               epochs=1, 
+                               lr=1e-3):
+        """
+        Full AlphaZero-style training loop:
+          - For num_iters:
+            1) Collect training data from self-play with the current best model
+            2) Train a candidate ("new") model on that data
+            3) Pit the new model vs. best model
+            4) If new model wins above threshold, adopt it
+        """
+        best_model = copy.deepcopy(self.model)
+
+        for iteration in range(num_iters):
+            print(f"\n--- Iteration {iteration+1}/{num_iters} ---")
+            iteration_examples = []
+            
+            # Collect self-play data using the current best model
+            # (Use a separate MCTSPolicy object that wraps best_model)
+            best_policy = MancalaModelMCTSPolicy(
+                best_model, 
+                c_puct=self.c_puct,
+                n_simulations=self.n_simulations,
+                dirichlet_alpha=self.dirichlet_alpha,
+                epsilon=self.epsilon
+            )
+
+            for _ in range(n_games_per_iter):
+                iteration_examples.extend(best_policy.play_self_game(temp=1.0))
+
+            # Create a new model starting from the best model's parameters
+            new_model = copy.deepcopy(best_model)
+            new_policy = MancalaModelMCTSPolicy(
+                new_model, 
+                c_puct=self.c_puct,
+                n_simulations=self.n_simulations,
+                dirichlet_alpha=self.dirichlet_alpha,
+                epsilon=self.epsilon
+            )
+
+            # Train new_model on the self-play examples
+            new_policy._train_on_examples(
+                iteration_examples, 
+                batch_size=batch_size, 
+                epochs=epochs, 
+                lr=lr
+            )
+
+            # Now pit new_policy vs best_policy
+            win_rate = new_policy.pit(best_policy, n_games=pit_games)
+            print(f"New model win rate = {win_rate*100:.2f}%")
+
+            if win_rate >= threshold:
+                print("New model surpasses threshold -> Accepting new model.")
+                best_model = copy.deepcopy(new_model)
+            else:
+                print("New model did not surpass threshold -> Keeping old model.")
+
+        self.model.load_state_dict(best_model.state_dict())
+        print("\nTraining finished. Best model is now loaded into self.model.")
+    
+    def save_policy_weights(policy, filepath):
+        """
+        Save the neural network weights of the MCTS policy to a file.
+        
+        Args:
+            policy: The MancalaModelMCTSPolicy instance
+            filepath: Path where to save the weights
+        """
+        torch.save(policy.model.state_dict(), filepath)
+    
+    def load_policy_weights(policy, filepath):
+        """
+        Load neural network weights into the MCTS policy from a file.
+        
+        Args:
+            policy: The MancalaModelMCTSPolicy instance
+            filepath: Path from where to load the weights
+        """
+        policy.model.load_state_dict(torch.load(filepath))
+        policy.model.eval()  # Set to evaluation mode
