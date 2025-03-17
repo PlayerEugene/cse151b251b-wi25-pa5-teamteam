@@ -69,40 +69,40 @@ def evaluate_mcts_vs_nn(model, num_games=10, mcts_simulations=50):
                 with torch.no_grad():
                     move_scores, state_value = model(inputs)
 
-                # valid_nn_moves = []
-                # for move in valid_moves:
-                #     if current_player == 1:
-                #         valid_nn_moves.append(move)
-                #     else:
-                #         valid_nn_moves.append(move - 7)
-                
-                # masked_scores = move_scores.clone()
-                # for move_idx in range(masked_scores.shape[-1]):
-                #     if move_idx not in valid_nn_moves:
-                #         masked_scores[move_idx] = float('-inf')
-
-                # predicted_nn_move = torch.argmax(masked_scores).item()
-                
-                # if current_player == 1:
-                #     game_move = predicted_nn_move
-                # else:
-                #     game_move = predicted_nn_move + 7
-                
-                # game.make_move(game_move)
-
-                for move in range(move_scores.shape[-1]):
+                valid_nn_moves = []
+                for move in valid_moves:
                     if current_player == 1:
-                    # if move < 6:
-                        if move not in valid_moves:
-                            move_scores[move] = float(0)
+                        valid_nn_moves.append(move)
                     else:
-                        if move + 1 not in valid_moves:
-                            move_scores[move] = float(0)
-                predicted_move = torch.argmax(move_scores).item()
-                if predicted_move >= 6:
-                    predicted_move += 1
+                        valid_nn_moves.append(move - 7)
+                
+                masked_scores = move_scores.clone()
+                for move_idx in range(masked_scores.shape[-1]):
+                    if move_idx not in valid_nn_moves:
+                        masked_scores[move_idx] = float('-inf')
 
-                game.make_move(predicted_move)
+                predicted_nn_move = torch.argmax(masked_scores).item()
+                
+                if current_player == 1:
+                    game_move = predicted_nn_move
+                else:
+                    game_move = predicted_nn_move + 7
+                
+                game.make_move(game_move)
+
+                # for move in range(move_scores.shape[-1]):
+                #     if current_player == 1:
+                #     # if move < 6:
+                #         if move not in valid_moves:
+                #             move_scores[move] = float(0)
+                #     else:
+                #         if move + 1 not in valid_moves:
+                #             move_scores[move] = float(0)
+                # predicted_move = torch.argmax(move_scores).item()
+                # if predicted_move >= 6:
+                #     predicted_move += 1
+
+                # game.make_move(predicted_move)
         
         p1_score, p2_score = game.get_score()
         if p1_score > p2_score:
