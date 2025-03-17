@@ -1,3 +1,4 @@
+from matplotlib import pyplot as plt
 import torch
 import random
 from MancalaModel import MancalaModelMCTS, MancalaModel
@@ -68,26 +69,40 @@ def evaluate_mcts_vs_nn(model, num_games=10, mcts_simulations=50):
                 with torch.no_grad():
                     move_scores, state_value = model(inputs)
 
-                valid_nn_moves = []
-                for move in valid_moves:
-                    if current_player == 1:
-                        valid_nn_moves.append(move)
-                    else:
-                        valid_nn_moves.append(move - 7)
+                # valid_nn_moves = []
+                # for move in valid_moves:
+                #     if current_player == 1:
+                #         valid_nn_moves.append(move)
+                #     else:
+                #         valid_nn_moves.append(move - 7)
                 
-                masked_scores = move_scores.clone()
-                for move_idx in range(masked_scores.shape[-1]):
-                    if move_idx not in valid_nn_moves:
-                        masked_scores[move_idx] = float('-inf')
+                # masked_scores = move_scores.clone()
+                # for move_idx in range(masked_scores.shape[-1]):
+                #     if move_idx not in valid_nn_moves:
+                #         masked_scores[move_idx] = float('-inf')
 
-                predicted_nn_move = torch.argmax(masked_scores).item()
+                # predicted_nn_move = torch.argmax(masked_scores).item()
                 
-                if current_player == 1:
-                    game_move = predicted_nn_move
-                else:
-                    game_move = predicted_nn_move + 7
+                # if current_player == 1:
+                #     game_move = predicted_nn_move
+                # else:
+                #     game_move = predicted_nn_move + 7
                 
-                game.make_move(game_move)
+                # game.make_move(game_move)
+
+                for move in range(move_scores.shape[-1]):
+                    if current_player == 1:
+                    # if move < 6:
+                        if move not in valid_moves:
+                            move_scores[move] = float(0)
+                    else:
+                        if move + 1 not in valid_moves:
+                            move_scores[move] = float(0)
+                predicted_move = torch.argmax(move_scores).item()
+                if predicted_move >= 6:
+                    predicted_move += 1
+
+                game.make_move(predicted_move)
         
         p1_score, p2_score = game.get_score()
         if p1_score > p2_score:
@@ -160,8 +175,50 @@ def evaluate_mcts_vs_nn(model, num_games=10, mcts_simulations=50):
         print("  No games played")
     print("----------------------------------")
 
+    return mcts_wins, nn_wins, draws
+
+def run_multiple_evaluations(model, num_runs=10, num_games_per_run=1000, mcts_simulations=500):
+    mcts_wins_all_runs = []
+    nn_wins_all_runs = []
+    draws_all_runs = []
+
+    for run_idx in range(num_runs):
+        print(f"\nStarting evaluation run {run_idx + 1}/{num_runs}...")
+        mcts_wins, nn_wins, draws = evaluate_mcts_vs_nn(model, num_games=num_games_per_run, mcts_simulations=mcts_simulations)
+        mcts_wins_all_runs.append(mcts_wins)
+        nn_wins_all_runs.append(nn_wins)
+        draws_all_runs.append(draws)
+
+    return mcts_wins_all_runs, nn_wins_all_runs, draws_all_runs
+
+
+def plot_results(mcts_wins_all_runs, nn_wins_all_runs, draws_all_runs):
+    run_numbers = list(range(1, len(mcts_wins_all_runs) + 1))
+
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(run_numbers, mcts_wins_all_runs, label="MCTS Wins", marker='o')
+    plt.plot(run_numbers, nn_wins_all_runs, label="NN Wins", marker='o')
+    plt.plot(run_numbers, draws_all_runs, label="Draws", marker='o')
+
+    plt.xlabel("Evaluation Run")
+    plt.ylabel("Number of Outcomes")
+    plt.title("MCTS vs NN Evaluation Results")
+    plt.legend()
+    plt.grid(True)
+
+    plt.show()
+
+
 if __name__ == "__main__":
     model = MancalaModel()
-    model.load_state_dict(torch.load('mancala_model.pth', map_location='cpu'))
+    model.load_state_dict(torch.load('mancala_model.pth'))
     model.eval()
-    evaluate_mcts_vs_nn(model, num_games=100, mcts_simulations=50)
+
+    # evaluate_mcts_vs_nn(model, num_games=1000, mcts_simulations=500)
+    num_runs = 10
+    num_games_per_run = 100
+
+    mcts_wins_all_runs, nn_wins_all_runs, draws_all_runs = run_multiple_evaluations(
+        model, num_runs=num_runs, num_games_per_run=num_games_per_run, mcts_simulations=500)
+    plot_results(mcts_wins_all_runs, nn_wins_all_runs, draws_all_runs)
