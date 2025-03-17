@@ -448,7 +448,7 @@ class MancalaModelMCTSPolicy:
 
         self.model.eval()
 
-    def pit(self, opponent_policy, n_games=10):
+    def pit(self, opponent_policy, n_games=50):
         """
         Pit this policy (self) against 'opponent_policy' for n_games.
         Return fraction of games that 'self' wins.
@@ -464,19 +464,18 @@ class MancalaModelMCTSPolicy:
             self._reset_mcts()
             opponent_policy._reset_mcts()
             
-            # If you want to alternate who goes first:
-            # if game_idx % 2 == 1:
-            #     game.current_player = 2
+            if game_idx % 2 == 1:
+                game.current_player = 2
 
             while not game.is_game_over():
                 if game.current_player == 1:
                     # use 'self' to pick a move
-                    policy = self.get_action_prob(game, temp=0.0, add_dirichlet_noise=False)
-                    action_idx = np.argmax(policy)
+                    policy = self.get_action_prob(game, temp=0.2, add_dirichlet_noise=False)
+                    action_idx = random.choices(range(len(policy)), weights=policy, k=1)[0]
                 else:
                     # use the opponent policy
-                    policy = opponent_policy.get_action_prob(game, temp=0.0, add_dirichlet_noise=False)
-                    action_idx = np.argmax(policy)
+                    policy = opponent_policy.get_action_prob(game, temp=0.2, add_dirichlet_noise=False)
+                    action_idx = random.choices(range(len(policy)), weights=policy, k=1)[0]
 
                 pocket = action_idx if action_idx < 6 else action_idx + 1
                 game.make_move(pocket)

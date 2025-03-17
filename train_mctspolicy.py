@@ -177,12 +177,12 @@ def main():
     )
 
     mcts_policy.train_policy_iteration(
-        num_iters=20,
-        n_games_per_iter=50,
-        pit_games=20,
-        threshold=0.55,
+        num_iters=100,
+        n_games_per_iter=500,
+        pit_games=50,
+        threshold=0.52,
         batch_size=64,
-        epochs=1,
+        epochs=2,
         lr=1e-3
     )
 
