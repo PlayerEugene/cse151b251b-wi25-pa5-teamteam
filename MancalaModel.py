@@ -19,25 +19,45 @@ class MancalaModel(nn.Module):
 
     def __init__(self):
         super().__init__()
-
-        self.relu = nn.ReLU(inplace=True)
-
-        self.lin1 = nn.Linear(13, 128)
-        self.lin2 = nn.Linear(128, 128)
         
-        self.policy_head = nn.Linear(128, 12)  
-        self.value_head = nn.Linear(128, 1) 
+        # Increase network capacity and add batch normalization
+        self.shared_layers = nn.Sequential(
+            nn.Linear(13, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Separate policy head with more capacity
+        self.policy_head = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 12)  # 12 possible moves
+        )
+        
+        # Value head with additional layers
+        self.value_head = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 32),
+            nn.ReLU(inplace=True),
+            nn.Linear(32, 1)
+        )
 
     def forward(self, x):
-        x1 = self.relu(self.lin1(x))
-        x2 = self.relu(self.lin2(x1))
-
-        move_probs = self.policy_head(x2)
+        shared_features = self.shared_layers(x)
+        
+        move_probs = self.policy_head(shared_features)
         move_probs = torch.softmax(move_probs, dim=-1)
-
-        state_value = self.value_head(x2)
+        
+        state_value = self.value_head(shared_features)
         state_value = torch.tanh(state_value)
-
+        
         return move_probs, state_value
 
 class MancalaModelMCTS:
@@ -172,17 +192,32 @@ class MancalaModelMCTSPolicy:
     def __init__(self, 
                  model: MancalaModel,
                  c_puct=1.4,
-                 n_simulations=50,
-                 dirichlet_alpha=0.03,
-                 epsilon=0.25):
-
+                 n_simulations=800,  # Increased from 50
+                 dirichlet_alpha=0.3,  # Increased from 0.03 for more exploration
+                 epsilon=0.25,
+                 virtual_loss=3.0):  # New parameter for parallel MCTS
+        
         self.model = model
         self.c_puct = c_puct
         self.n_simulations = n_simulations
         self.dirichlet_alpha = dirichlet_alpha
         self.epsilon = epsilon
+        self.virtual_loss = virtual_loss
+        
+        # Add temperature schedule for self-play
+        self.temp_schedule = {
+            0: 1.0,    # First 30% of moves
+            0.3: 0.5,  # Next 40% of moves
+            0.7: 0.25, # Final 30% of moves
+        }
+        
+        # Initialize MCTS statistics
+        self._reset_mcts()
 
-        # MCTS statistics:
+    def _reset_mcts(self):
+        """
+        Clear MCTS data so each new game has its own fresh search tree.
+        """
         self.N = {}
         self.W = {}
         self.Q = {}
@@ -190,15 +225,6 @@ class MancalaModelMCTSPolicy:
 
         # Flag for whether to add noise to the root node (self-play).
         self.add_dirichlet_noise = False
-
-    def _reset_mcts(self):
-        """
-        Clear MCTS data so each new game has its own fresh search tree.
-        """
-        self.N.clear()
-        self.W.clear()
-        self.Q.clear()
-        self.P.clear()
 
     def _get_state_key(self, game: MancalaGame) -> str:
         board_str = ",".join(map(str, game.board))
@@ -573,3 +599,11 @@ class MancalaModelMCTSPolicy:
         """
         policy.model.load_state_dict(torch.load(filepath))
         policy.model.eval()  # Set to evaluation mode
+
+    def get_temperature(self, move_number, total_moves=60):
+        """Dynamic temperature based on game progress"""
+        progress = move_number / total_moves
+        for threshold, temp in sorted(self.temp_schedule.items()):
+            if progress <= threshold:
+                return temp
+        return self.temp_schedule[max(self.temp_schedule.keys())]

@@ -167,23 +167,34 @@ def evaluate_mctspolicy_vs_mcts(policy: MancalaModelMCTSPolicy,
 
 def main():
     model = MancalaModel()
+    
+    # Add learning rate scheduler
+    initial_lr = 2e-3
+    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
 
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=20,  # number of iterations
+        eta_min=1e-4
+    )
+    
     mcts_policy = MancalaModelMCTSPolicy(
         model=model,
         c_puct=1.4,
-        n_simulations=50,
-        dirichlet_alpha=0.03,
+        n_simulations=800,
+        dirichlet_alpha=0.3,
         epsilon=0.25
     )
 
+    # Modified training parameters
     mcts_policy.train_policy_iteration(
         num_iters=20,
-        n_games_per_iter=50,
-        pit_games=20,
+        n_games_per_iter=100,  # Increased from 50
+        pit_games=40,          # Increased from 20
         threshold=0.55,
-        batch_size=64,
-        epochs=1,
-        lr=1e-3
+        batch_size=128,        # Increased from 64
+        epochs=2,              # Increased from 1
+        lr=initial_lr
     )
 
     evaluate_mctspolicy_vs_mcts(mcts_policy, num_games=100, mcts_simulations=50)
