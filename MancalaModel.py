@@ -15,8 +15,7 @@ def copy_game_state(game: MancalaGame) -> MancalaGame:
     new_game.current_player = game.current_player
     return new_game
 
-class MancalaModel(nn.Module):
-
+class BaseMancalaModel(nn.Module):
     def __init__(self):
         super().__init__()
 
@@ -36,6 +35,78 @@ class MancalaModel(nn.Module):
         move_probs = torch.softmax(move_probs, dim=-1)
 
         state_value = self.value_head(x2)
+        state_value = torch.tanh(state_value)
+
+        return move_probs, state_value
+
+class MancalaModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(13, 128)
+        self.ln1 = nn.LayerNorm(128)
+        self.fc2 = nn.Linear(128, 64)
+        self.ln2 = nn.LayerNorm(64)
+        self.dropout = nn.Dropout(p=0.1)
+        self.relu = nn.ReLU(inplace=True)
+        
+        self.policy_head = nn.Linear(64, 12)
+        self.value_head = nn.Linear(64, 1)
+
+    def forward(self, x):
+        x = self.relu(self.ln1(self.fc1(x)))
+        x = self.relu(self.ln2(self.fc2(x)))
+        x = self.dropout(x)
+
+        move_probs = self.policy_head(x)
+        move_probs = torch.softmax(move_probs, dim=-1)
+
+        state_value = self.value_head(x)
+        state_value = torch.tanh(state_value)
+
+        return move_probs, state_value
+
+class MancalaModelv2(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Increase initial layer size for better feature extraction
+        self.fc1 = nn.Linear(13, 256)  # Increased from 128
+        self.ln1 = nn.LayerNorm(256)
+        
+        # Add more layers for deeper pattern recognition
+        self.fc2 = nn.Linear(256, 128)
+        self.ln2 = nn.LayerNorm(128)
+        
+        self.fc3 = nn.Linear(128, 64)  # New layer
+        self.ln3 = nn.LayerNorm(64)
+        
+        # Slightly increase dropout for better generalization
+        self.dropout = nn.Dropout(p=0.15)  # Increased from 0.1
+        self.relu = nn.LeakyReLU(inplace=True)  # Changed from ReLU to LeakyReLU
+        
+        # Heads remain the same size but get separate dropouts
+        self.policy_dropout = nn.Dropout(p=0.1)
+        self.value_dropout = nn.Dropout(p=0.1)
+        self.policy_head = nn.Linear(64, 12)
+        self.value_head = nn.Linear(64, 1)
+
+    def forward(self, x):
+        x = self.relu(self.ln1(self.fc1(x)))
+        x = self.dropout(x)
+        
+        x = self.relu(self.ln2(self.fc2(x)))
+        x = self.dropout(x)
+        
+        x = self.relu(self.ln3(self.fc3(x)))
+        x = self.dropout(x)
+
+        # Separate paths for policy and value
+        policy = self.policy_dropout(x)
+        value = self.value_dropout(x)
+
+        move_probs = self.policy_head(policy)
+        move_probs = torch.softmax(move_probs, dim=-1)
+
+        state_value = self.value_head(value)
         state_value = torch.tanh(state_value)
 
         return move_probs, state_value
@@ -170,13 +241,15 @@ class MancalaModelMCTS:
 
 class MancalaModelMCTSPolicy:
     def __init__(self, 
-                 model: MancalaModel,
+                 model: MancalaModelv2,
                  c_puct=1.4,
                  n_simulations=50,
                  dirichlet_alpha=0.03,
-                 epsilon=0.25):
+                 epsilon=0.25,
+                 device='cuda' if torch.cuda.is_available() else 'cpu'):
 
-        self.model = model
+        self.model = model.to(device)
+        self.device = device
         self.c_puct = c_puct
         self.n_simulations = n_simulations
         self.dirichlet_alpha = dirichlet_alpha
@@ -210,12 +283,15 @@ class MancalaModelMCTSPolicy:
         """
         in_tensor = torch.tensor(
             game.board[0:6] + game.board[7:13] + [game.current_player],
-            dtype=torch.float32
+            dtype=torch.float32,
+            device=self.device
         ).unsqueeze(0)
+        
         with torch.no_grad():
             move_probs, value = self.model(in_tensor)
+        
         move_probs = move_probs[0].cpu().numpy()
-        value = value[0].item()
+        value = value[0].cpu().item()
         return move_probs, value
 
     def _expand_node(self, game: MancalaGame, state_key: str):
@@ -408,7 +484,6 @@ class MancalaModelMCTSPolicy:
     def _train_on_examples(self, examples, batch_size=64, epochs=1, lr=1e-3):
         """
         Train the network on the provided examples (state, pi, z).
-        This is extracted from your `train_self_play(...)` code but modularized.
         """
         states = []
         pis = []
@@ -418,15 +493,14 @@ class MancalaModelMCTSPolicy:
             pis.append(pi)
             zs.append(z)
 
-        states_t = torch.tensor(states, dtype=torch.float32)
-        pis_t = torch.tensor(pis, dtype=torch.float32)
-        zs_t = torch.tensor(zs, dtype=torch.float32).unsqueeze(-1)
+        states_t = torch.tensor(states, dtype=torch.float32, device=self.device)
+        pis_t = torch.tensor(pis, dtype=torch.float32, device=self.device)
+        zs_t = torch.tensor(zs, dtype=torch.float32, device=self.device).unsqueeze(-1)
 
         dataset = TensorDataset(states_t, pis_t, zs_t)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
         optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        xent = nn.CrossEntropyLoss()
         mse = nn.MSELoss()
 
         self.model.train()
@@ -448,41 +522,57 @@ class MancalaModelMCTSPolicy:
 
         self.model.eval()
 
-    def pit(self, opponent_policy, n_games=50):
+    def pit(self, opponent_policy, n_games=50, opponent_is_mcts=False, mcts_simulations=50):
         """
-        Pit this policy (self) against 'opponent_policy' for n_games.
-        Return fraction of games that 'self' wins.
-        Each side can go first half the time (optional).
+        Pit this policy against either another policy or pure MCTS.
+        
+        Args:
+            opponent_policy: Either another MCTSPolicy instance or an MCTS instance
+            n_games: Number of games to play
+            opponent_is_mcts: If True, opponent_policy is treated as pure MCTS
+            mcts_simulations: Number of MCTS simulations if opponent_is_mcts=True
         """
         self_wins = 0
         for game_idx in range(n_games):
-            # Alternate who goes first, for fairness
-            # (Assuming MancalaGame can set current_player manually, or
-            #  just rely on the default. You might vary who starts if desired.)
-            
             game = MancalaGame()
             self._reset_mcts()
-            opponent_policy._reset_mcts()
+            if not opponent_is_mcts:
+                opponent_policy._reset_mcts()
+            else:
+                # Create fresh MCTS opponent for each game with correct parameters
+                opponent_policy = MancalaModelMCTS(
+                    num_simulations=mcts_simulations,
+                    ucb_c=1.4,
+                    mcts_player=2 if game_idx % 2 == 0 else 1
+                )
             
-            if game_idx % 2 == 1:
+            # Alternate who plays as Player 1
+            we_play_as_p1 = (game_idx % 2 == 0)
+            if not we_play_as_p1:
                 game.current_player = 2
 
             while not game.is_game_over():
-                if game.current_player == 1:
+                is_our_turn = (game.current_player == 1) == we_play_as_p1
+                
+                if is_our_turn:
                     # use 'self' to pick a move
                     policy = self.get_action_prob(game, temp=0.2, add_dirichlet_noise=False)
                     action_idx = random.choices(range(len(policy)), weights=policy, k=1)[0]
+                    pocket = action_idx if action_idx < 6 else action_idx + 1
                 else:
-                    # use the opponent policy
-                    policy = opponent_policy.get_action_prob(game, temp=0.2, add_dirichlet_noise=False)
-                    action_idx = random.choices(range(len(policy)), weights=policy, k=1)[0]
-
-                pocket = action_idx if action_idx < 6 else action_idx + 1
+                    # use the opponent (either MCTS or policy)
+                    if opponent_is_mcts:
+                        pocket = opponent_policy.mcts(game)
+                    else:
+                        policy = opponent_policy.get_action_prob(game, temp=0.2, add_dirichlet_noise=False)
+                        action_idx = random.choices(range(len(policy)), weights=policy, k=1)[0]
+                        pocket = action_idx if action_idx < 6 else action_idx + 1
+                
                 game.make_move(pocket)
 
             p1_score, p2_score = game.get_score()
             winner = 1 if (p1_score > p2_score) else (2 if p2_score > p1_score else 0)
-            if winner == 1:
+            if (winner == 1 and we_play_as_p1) or (winner == 2 and not we_play_as_p1):
                 self_wins += 1
         return self_wins / n_games
 
@@ -493,23 +583,34 @@ class MancalaModelMCTSPolicy:
                                threshold=0.55,
                                batch_size=64, 
                                epochs=1, 
-                               lr=1e-3):
-        """
-        Full AlphaZero-style training loop:
-          - For num_iters:
-            1) Collect training data from self-play with the current best model
-            2) Train a candidate ("new") model on that data
-            3) Pit the new model vs. best model
-            4) If new model wins above threshold, adopt it
-        """
-        best_model = copy.deepcopy(self.model)
+                               lr=1e-3,
+                               base_model_path=None):
+        if base_model_path:
+            print(f"Loading base model from {base_model_path}")
+            self.model.load_state_dict(torch.load(base_model_path))
+            best_model = copy.deepcopy(self.model)
+        else:
+            best_model = copy.deepcopy(self.model)
+
+        # Create pure MCTS opponent
+        mcts_opponent = MancalaModelMCTS(num_simulations=50, mcts_player=2)
+        
+        # Track best model's MCTS performance
+        best_policy = MancalaModelMCTSPolicy(
+            best_model, 
+            c_puct=self.c_puct,
+            n_simulations=self.n_simulations,
+            dirichlet_alpha=self.dirichlet_alpha,
+            epsilon=self.epsilon
+        )
+        best_mcts_win_rate = best_policy.pit(mcts_opponent, n_games=pit_games, opponent_is_mcts=True)
+        print(f"Initial model vs MCTS win rate = {best_mcts_win_rate*100:.2f}%")
 
         for iteration in range(num_iters):
             print(f"\n--- Iteration {iteration+1}/{num_iters} ---")
             iteration_examples = []
             
             # Collect self-play data using the current best model
-            # (Use a separate MCTSPolicy object that wraps best_model)
             best_policy = MancalaModelMCTSPolicy(
                 best_model, 
                 c_puct=self.c_puct,
@@ -521,7 +622,7 @@ class MancalaModelMCTSPolicy:
             for _ in range(n_games_per_iter):
                 iteration_examples.extend(best_policy.play_self_game(temp=1.0))
 
-            # Create a new model starting from the best model's parameters
+            # Create and train new model
             new_model = copy.deepcopy(best_model)
             new_policy = MancalaModelMCTSPolicy(
                 new_model, 
@@ -531,7 +632,6 @@ class MancalaModelMCTSPolicy:
                 epsilon=self.epsilon
             )
 
-            # Train new_model on the self-play examples
             new_policy._train_on_examples(
                 iteration_examples, 
                 batch_size=batch_size, 
@@ -539,15 +639,43 @@ class MancalaModelMCTSPolicy:
                 lr=lr
             )
 
-            # Now pit new_policy vs best_policy
-            win_rate = new_policy.pit(best_policy, n_games=pit_games)
-            print(f"New model win rate = {win_rate*100:.2f}%")
+            # Evaluate against both previous best and MCTS
+            win_rate_vs_old = new_policy.pit(best_policy, n_games=pit_games)
+            print(f"New model vs old model win rate = {win_rate_vs_old*100:.2f}%")
+            
+            mcts_win_rate = new_policy.pit(mcts_opponent, n_games=pit_games, opponent_is_mcts=True)
+            print(f"New model vs MCTS win rate = {mcts_win_rate*100:.2f}%")
+            print(f"Previous best vs MCTS win rate = {best_mcts_win_rate*100:.2f}%")
 
-            if win_rate >= threshold:
-                print("New model surpasses threshold -> Accepting new model.")
+            # More flexible acceptance criteria
+            should_accept = False
+            
+            # Accept if significantly better against MCTS
+            if mcts_win_rate >= best_mcts_win_rate + 0.1:  # 10% improvement threshold
+                print("New model shows significant improvement against MCTS -> Accepting")
+                should_accept = True
+            # Accept if better against MCTS and competitive with old model
+            elif mcts_win_rate >= best_mcts_win_rate and win_rate_vs_old >= 0.45:
+                print("New model improves vs MCTS while maintaining reasonable performance vs old model -> Accepting")
+                should_accept = True
+            # Accept if significantly better against old model
+            elif win_rate_vs_old >= threshold + 0.04 and mcts_win_rate >= best_mcts_win_rate - 0.04:  # 10% above threshold
+                print("New model shows significant improvement against old model -> Accepting")
+                should_accept = True
+            elif win_rate_vs_old >= threshold + 0.08 and mcts_win_rate >= best_mcts_win_rate - 0.08:
+                print("New model shows significant improvement against old model -> Accepting")
+                should_accept = True
+            elif win_rate_vs_old >= threshold + 0.14:
+                print("New model shows significant improvement against old model and MCTS -> Accepting")
+                should_accept = True
+
+            if should_accept:
                 best_model = copy.deepcopy(new_model)
+                best_mcts_win_rate = mcts_win_rate
+                torch.save(best_model.state_dict(), f"./modelsv4/policy_model_iter_{iteration+1000}.pth")
             else:
-                print("New model did not surpass threshold -> Keeping old model.")
+                torch.save(best_model.state_dict(), f"./modelsv4/policy_model_iter_{iteration+100}.pth")
+                print("New model did not meet acceptance criteria -> Keeping old model.")
 
         self.model.load_state_dict(best_model.state_dict())
         print("\nTraining finished. Best model is now loaded into self.model.")

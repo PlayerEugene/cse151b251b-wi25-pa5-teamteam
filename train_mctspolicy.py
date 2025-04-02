@@ -1,6 +1,6 @@
 import torch
 import os
-from MancalaModel import MancalaModel, MancalaModelMCTS, MancalaModelMCTSPolicy
+from MancalaModel import MancalaModel, MancalaModelMCTS, MancalaModelMCTSPolicy, MancalaModelv2
 from engine import MancalaGame
 import random
 
@@ -34,14 +34,13 @@ def evaluate_mctspolicy_vs_mcts(policy: MancalaModelMCTSPolicy,
     mcts_as_p2_wins = 0
 
     for game_idx in range(num_games):
-        print(f"\n=== Starting Game {game_idx + 1}/{num_games} ===")
+        #print(f"\n=== Starting Game {game_idx + 1}/{num_games} ===")
         # Create a fresh game
         game = MancalaGame()
         
-        # Randomly decide which side the policy (MancalaModelMCTSPolicy) takes
-        policy_is_p1 = random.choice([True, False])
+        policy_is_p1 = game_idx % 2 == 0
         if policy_is_p1:
-            print("Policy is Player 1, MCTS is Player 2")
+            #print("Policy is Player 1, MCTS is Player 2")
             # MCTS agent is forced to be player 2
             mcts_agent = MancalaModelMCTS(num_simulations=mcts_simulations,
                                           ucb_c=1.4, 
@@ -49,7 +48,7 @@ def evaluate_mctspolicy_vs_mcts(policy: MancalaModelMCTSPolicy,
             policy_as_p1_games += 1
             mcts_as_p2_games += 1
         else:
-            print("MCTS is Player 1, Policy is Player 2")
+            #print("MCTS is Player 1, Policy is Player 2")
             # MCTS agent is forced to be player 1
             mcts_agent = MancalaModelMCTS(num_simulations=mcts_simulations,
                                           ucb_c=1.4, 
@@ -58,9 +57,9 @@ def evaluate_mctspolicy_vs_mcts(policy: MancalaModelMCTSPolicy,
             mcts_as_p1_games += 1
 
         # Randomize who moves first (override default current_player=1)
-        starting_player = random.choice([1, 2])
-        game.current_player = starting_player
-        print(f"Randomly chosen starter: Player {starting_player}")
+        #starting_player = random.choice([1, 2])
+        game.current_player = 1
+        #print(f"Randomly chosen starter: Player {starting_player}")
 
         while not game.is_game_over():
             current_player = game.get_current_player()
@@ -83,7 +82,7 @@ def evaluate_mctspolicy_vs_mcts(policy: MancalaModelMCTSPolicy,
         
         # Game is over; figure out who won
         p1_score, p2_score = game.get_score()
-        print(f"Final Board: P1={p1_score}, P2={p2_score}")
+        #print(f"Final Board: P1={p1_score}, P2={p2_score}")
 
         if p1_score > p2_score:
             p1_wins += 1
@@ -103,22 +102,24 @@ def evaluate_mctspolicy_vs_mcts(policy: MancalaModelMCTSPolicy,
             if policy_is_p1:
                 policy_wins += 1
                 policy_as_p1_wins += 1
-                print("Winner: Policy (Player 1)")
+                #print("Winner: Policy (Player 1)")
             else:
                 mcts_wins += 1
                 mcts_as_p1_wins += 1
-                print("Winner: MCTS (Player 1)")
+                #print("Winner: MCTS (Player 1)")
         elif winner == 2:
             if policy_is_p1:
                 mcts_wins += 1
                 mcts_as_p2_wins += 1
-                print("Winner: MCTS (Player 2)")
+                #print("Winner: MCTS (Player 2)")
             else:
                 policy_wins += 1
                 policy_as_p2_wins += 1
-                print("Winner: Policy (Player 2)")
+                #print("Winner: Policy (Player 2)")
         else:
-            print("Result: Tie")
+            #print("Result: Tie")
+            #draws += 1
+            pass
 
     # Print summary statistics
     print("\n--- Policy vs MCTS Results ---")
@@ -164,31 +165,33 @@ def evaluate_mctspolicy_vs_mcts(policy: MancalaModelMCTSPolicy,
         print("  (No games played as P2)")
 
     print("----------------------------------")
+    return policy_wins, mcts_wins, draws
 
 def main():
-    model = MancalaModel()
+    model = MancalaModelv2()
 
     mcts_policy = MancalaModelMCTSPolicy(
         model=model,
-        c_puct=1.4,
-        n_simulations=50,
+        c_puct=1.6,
+        n_simulations=200,
         dirichlet_alpha=0.03,
         epsilon=0.25
     )
 
     mcts_policy.train_policy_iteration(
-        num_iters=100,
-        n_games_per_iter=500,
-        pit_games=50,
+        num_iters=50,
+        n_games_per_iter=200,
+        pit_games=100,
         threshold=0.52,
-        batch_size=64,
+        batch_size=128,
         epochs=2,
-        lr=1e-3
+        lr=5e-3,
+        base_model_path='/workspace/cse151b251b-wi25-pa5-teamteam/modelsv4/policy_model_iter_106.pth'
     )
 
     evaluate_mctspolicy_vs_mcts(mcts_policy, num_games=100, mcts_simulations=50)
 
-    MancalaModelMCTSPolicy.save_policy_weights(mcts_policy, "policy_model.pth")
+    MancalaModelMCTSPolicy.save_policy_weights(mcts_policy, "policy_modelv4_final.pth")
 
 if __name__ == "__main__":
     main()
